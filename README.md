@@ -149,6 +149,27 @@ renders "not available on this Host" instead of a wrong zero (ADR-0001).
   build or a small `//go:linkname`/assembly shim — tracked as follow-up
   work, not silently papered over.
 
+## Repository layout
+
+This code lives in two GitHub repos under `HeavenMatrix-Labs`:
+
+| Repo | Contents | Why |
+|---|---|---|
+| `rack_ops` | The monorepo: `app/` (Flutter), `backend/` (Firebase), `agent/` (this code), docs and tickets | One history for the product |
+| `rackops-agent` | **This Agent alone**, at the repository root | Auditable on its own (spec story 44); `install.sh` downloads releases from it |
+
+The split is made with `git subtree split --prefix=agent`, so the Agent
+repo carries the real commit history rather than a squashed snapshot.
+Future Agent commits reach the standalone repo with
+`git subtree push --prefix=agent <remote> <branch>`.
+
+CI differs slightly between the two: the monorepo workflow uses
+`working-directory: agent`, while the standalone repo runs from the
+root. The standalone workflow is maintained as a template at
+`agent/ci/standalone-github-actions.yml` and copied to
+`.github/workflows/ci.yml` in the split repo. Keep the two in sync —
+a fix that passes in one layout must pass in the other.
+
 ## Building (from source)
 
 ```sh
