@@ -1,25 +1,23 @@
 //go:build darwin
 
-// Darwin collectors: CPU, memory, uptime, hardware specs, and (limited)
-// disk/temperature. All of these read only public sysctls and the
-// standard library, so the agent stays a small static binary and the
-// Collector seam is the only place the platform code enters.
+// Darwin collectors. All of these use only the standard library, so the
+// agent stays a small static binary and the Collector seam remains the
+// only place platform code enters.
 //
 // Honest limitations of the stdlib-only build (recorded in the
 // ticket-02 closeout):
 //
-//   - CPU: kern.cp_time requires sysctlbyname(3) for struct/array values,
-//     which Go's syscall package doesn't expose cross-platform. The
-//     Collector degrades to "unavailable" until we either accept cgo or
-//     add a thin CGO shim.
-//   - Network: getifaddrs is a C API; the Collector marks the slice
-//     unavailable.
-//   - Temperature: the SMC framework needs root; the Collector errors.
-//   - Disks: we probe well-known mount points instead of getmntinfo,
-//     so the list is best-effort (root + /System/Volumes/Data).
+//   - CPU, memory, uptime: Go's syscall.Sysctl exposes only
+//     string- and uint32-valued sysctls. kern.cp_time, vm.stats2 and
+//     kern.boottime are all struct/array sysctls that need
+//     sysctlbyname(3) via cgo, so these slices report unavailable.
+//   - Network: getifaddrs is a C API; the slice reports unavailable.
+//   - Temperature: the SMC framework needs root; unavailable.
+//   - Disks: we probe well-known mount points instead of getmntinfo, so
+//     the list is best-effort.
 //
-// Everything else (host info, memory via vm.stats, boottime) works in
-// the stdlib-only build.
+// What does work on macOS today: host info (hostname, OS, arch), disk
+// capacity via statfs, uptime-free specs, and the logical CPU count.
 package platform
 
 import (
@@ -48,7 +46,7 @@ func allCollectors() []collect.Collector {
 // sysctlbyname(3).
 type cpuCollector struct{}
 
-func (c *cpuCollector) ID() string { return "cpu" }
+func (c *cpuCollector) ID() collect.ID { return collect.IDCPU }
 
 func (c *cpuCollector) Collect(_ context.Context, _ *collect.HostMetrics, _ *collect.HostInfo) error {
 	return fmt.Errorf("darwin cpu: not available in stdlib-only build")
@@ -60,7 +58,7 @@ func (c *cpuCollector) Collect(_ context.Context, _ *collect.HostMetrics, _ *col
 // below still gives us the block sizes.
 type memoryCollector struct{}
 
-func (c *memoryCollector) ID() string { return "memory" }
+func (c *memoryCollector) ID() collect.ID { return collect.IDMemory }
 
 func (c *memoryCollector) Collect(_ context.Context, _ *collect.HostMetrics, _ *collect.HostInfo) error {
 	return fmt.Errorf("darwin memory: not available in stdlib-only build")
@@ -71,7 +69,7 @@ func (c *memoryCollector) Collect(_ context.Context, _ *collect.HostMetrics, _ *
 // we probe the well-known ones and keep the readable ones.
 type diskCollector struct{}
 
-func (c *diskCollector) ID() string { return "disk" }
+func (c *diskCollector) ID() collect.ID { return collect.IDDisk }
 
 func (c *diskCollector) Collect(_ context.Context, m *collect.HostMetrics, _ *collect.HostInfo) error {
 	probed := []string{"/", "/System/Volumes/Data"}
@@ -100,7 +98,7 @@ func (c *diskCollector) Collect(_ context.Context, m *collect.HostMetrics, _ *co
 // marks the slice unavailable with a reason so the app degrades gracefully.
 type networkCollector struct{}
 
-func (c *networkCollector) ID() string { return "network" }
+func (c *networkCollector) ID() collect.ID { return collect.IDNetwork }
 
 func (c *networkCollector) Collect(_ context.Context, _ *collect.HostMetrics, _ *collect.HostInfo) error {
 	return fmt.Errorf("darwin network: not available in stdlib-only build")
@@ -112,43 +110,31 @@ func (c *networkCollector) Collect(_ context.Context, _ *collect.HostMetrics, _ 
 // sensor readable.
 type temperatureCollector struct{}
 
-func (c *temperatureCollector) ID() string { return "temperature" }
+func (c *temperatureCollector) ID() collect.ID { return collect.IPTemperature }
 
 func (c *temperatureCollector) Collect(_ context.Context, _ *collect.HostMetrics, _ *collect.HostInfo) error {
 	return fmt.Errorf("darwin temperature: requires root (SMC) - not available in this mode")
 }
 
-// uptimeCollector reads KERN_BOOTTIME — a string sysctl — which the
-// stdlib Sysctl can return. We treat the value as a Unix-seconds boot
-// time.
+// uptimeCollector reports unavailable on darwin. kern.boottime is a
+// struct timeval, and Go's stdlib syscall.Sysctl only exposes
+// string- and uint32-valued sysctls, so there is no stdlib-only way to
+// read the boot time. We do not call sysctl and discard the result: an
+// honest error is better than a plausible-looking zero.
 type uptimeCollector struct{}
 
-func (c *uptimeCollector) ID() string { return "uptime" }
+func (c *uptimeCollector) ID() collect.ID { return collect.IDUptime }
 
-func (c *uptimeCollector) Collect(_ context.Context, m *collect.HostMetrics, info *collect.HostInfo) error {
-	// kern.boottime is a struct timeval {sec, usec}. stdlib Sysctl
-	// returns a string for it on some versions, so we fall back to
-	// an honest "unavailable" if the string form doesn't parse as
-	// an integer.
-	boot, err := syscall.Sysctl("kern.boottime")
-	if err != nil {
-		return fmt.Errorf("darwin uptime: %w", err)
-	}
-	// The Sysctl string form of a timeval is opaque; we mark the
-	// Collector unavailable so the snapshot carries an honest reason
-	// instead of a wrong number.
-	_ = boot
-	m.UptimeSeconds = 0
-	info.Uptime = 0
-	return fmt.Errorf("darwin uptime: sysctl kern.boottime is a struct, not reachable stdlib-only")
+func (c *uptimeCollector) Collect(_ context.Context, _ *collect.HostMetrics, _ *collect.HostInfo) error {
+	return fmt.Errorf("darwin uptime: kern.boottime is a struct sysctl, not reachable stdlib-only")
 }
 
-// hardwareCollector fills in what the stdlib-only build can reach:
-// the logical CPU count and, via the same (limited) paths as the
-// memory Collector, total RAM.
+// hardwareCollector fills in what the stdlib-only build can reach: the
+// logical CPU count. Total RAM needs the vm.stats2 struct sysctl, which
+// the memory Collector reports as unavailable for.
 type hardwareCollector struct{}
 
-func (c *hardwareCollector) ID() string { return "hardware" }
+func (c *hardwareCollector) ID() collect.ID { return collect.IDHardware }
 
 func (c *hardwareCollector) Collect(_ context.Context, m *collect.HostMetrics, info *collect.HostInfo) error {
 	info.Hardware.NumCPU = runtime.NumCPU()

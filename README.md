@@ -1,9 +1,9 @@
 # rackops-agent
 
-Per-host Agent for the RackOps homelab management app. Apache-2.0.
+The RackOps Agent for a Host. Apache-2.0.
 
 The Agent runs on a Host, collects its metrics and hardware specs, and
-serves the Agent API v1 (host info, on-demand metrics, WebSocket metrics
+serves the Agent API v1 (Host info, on-demand metrics, WebSocket metrics
 stream) behind a per-Host registration token, optionally over TLS. The
 RackOps app's Agent Connector talks to exactly this surface (ADR-0001).
 
@@ -23,53 +23,55 @@ stays a small static executable.
 
 ## Install
 
-**Linux (one-liner, root by default):**
+**Linux (systemd, root by default):**
 
 ```sh
-curl -fsSL https://<host>/rackops-agent-install.sh | sudo bash -s -- [--limited] [--user]
+git clone https://github.com/rackops/rack_ops && cd rack_ops
+sudo ./agent/install.sh            # [--limited] [--user] [--version vX.Y.Z]
 ```
 
-**macOS (one-liner, user-level launchd):**
+**macOS (launchd, user-level):**
 
 ```sh
-curl -fsSL https://<host>/rackops-agent-install.sh | bash -s -- [--limited]
+./agent/install.sh --limited       # optional; installs a LaunchAgent
 ```
 
-**Windows:** the release zip ships `rackops-agent.exe`; register it as a
-service with `sc.exe create rackops-agent binPath= C:\ProgramFiles\rackops\rackops-agent.exe`
-(or run it directly). See `install/` for the scripted Windows service
-registration.
-
-The installer downloads the prebuilt binary (or builds from source in
-this repo until the GitHub org exists — ticket 13), writes a
-self-signed TLS cert, registers the service (systemd / launchd /
-Windows service), and prints the registration token:
+**Windows:** from an elevated prompt in a directory containing
+`rackops-agent.exe`:
 
 ```
-Registration token:
-  NTQ3...
+agent\install\windows-service.bat
 ```
+
+All three write a self-signed TLS pair (Linux/macOS via `openssl`,
+Windows via `openssl` if present), register the service, and print the
+registration token. Before the release pipeline exists the installer
+builds from the `agent/` source tree; set `RACKOPS_AGENT_RELEASE_BASE`
+to a release mirror to download instead.
 
 Paste that token into the RackOps app (Hosts → Add → Agent) to add the
-Host to your Lab. The token persists on the Host across restarts; use
-`rackops-agent -show-token` to display it again.
+Host to your Lab. The token persists on the Host across restarts; read
+it again with `rackops-agent -show-token -token <path>` (the installer
+prints the path), or let the app fetch nothing — it only ever holds the
+value you pasted.
 
 **Uninstall:**
 
 ```sh
-curl -fsSL https://<host>/rackops-agent-uninstall.sh | sudo bash -s -- [--remove-data]
+sudo ./agent/uninstall.sh [--remove-data]
 ```
 
-**In-place update:** re-run the installer with a newer `--version`;
-the service is re-enabled in place. The old binary is replaced, the
-token and TLS files are kept.
+**In-place update:** re-run the installer. It stops the service before
+replacing the binary (installing over a running image fails), and keeps
+the existing token and TLS files, so the Host stays reachable under the
+same token the app already holds.
 
 ## Agent API v1
 
 All endpoints except `/health` require the token:
 
 ```
-Authorization: Bearer <token>        # or ?token=<token>
+Authorization: Bearer <token>
 ```
 
 | Endpoint | Description |
@@ -117,24 +119,34 @@ is marked unavailable with a human-readable reason.
 - **full** (default): the Agent runs as root and every Collector runs.
 - **limited**: unprivileged. Privileged Collectors (temperature sensors
   on some platforms) are skipped and marked unavailable; CPU, memory,
-  disks, uptime, and hardware specs still work. The Agent is
-  Docker-socket-capable in this mode for container counts.
+  disks, uptime, and hardware specs still work.
 
 Limited mode flag: `-mode limited` (installer: `--limited`).
 
+Container management is **not** part of the Agent. Per ADR-0001, Docker
+is an app-side Connector ("no Host-side changes"), so container counts
+and control come from the Docker Engine API, not from this process.
+
 ## Platform notes
 
-- **Linux**: procfs + sysfs; temperature from `thermal_zone*` when
-  readable; hardware specs from `/proc/cpuinfo`, `/sys/block`, and DMI
-  (`/sys/class/dmi/id`).
+Every Collector reports *availability*, not just a value: a slice the
+platform cannot read is marked unavailable with a reason, so the app
+renders "not available on this Host" instead of a wrong zero (ADR-0001).
+
+- **Linux**: procfs + sysfs. CPU, memory, disks, network rates, uptime,
+  hardware specs and thermal_zone temperatures all work.
 - **Windows**: Win32 (`GetSystemTimes`, `GlobalMemoryStatusEx`,
   `GetDiskFreeSpaceExW`, `GetTickCount64`). Temperature is reported
-  "not available on this Host" — there's no stdlib-accessible
-  temperature API; the app degrades gracefully.
-- **macOS**: `syscall.Sysctl` for boot time; disk via `statfs`. CPU,
-  memory, and network rates need the C `sysctlbyname`/`getifaddrs`
-  APIs which the stdlib-only build can't call, so those slices are
-  marked unavailable until a cgo build lands.
+  unavailable — there is no stdlib-accessible temperature API. Network
+  rates need the IP Helper API (`iphlpapi.dll`), which this build does
+  not link, so that slice is also unavailable.
+- **macOS**: **partial.** Host info, disk capacity (`statfs`) and the
+  logical CPU count work. CPU usage, memory, uptime and network rates
+  are unavailable: they need `sysctlbyname(3)` / `getifaddrs`, which Go's
+  `syscall` package does not expose without cgo. Temperature needs the
+  SMC framework (root). Bringing macOS to parity needs either a cgo
+  build or a small `//go:linkname`/assembly shim — tracked as follow-up
+  work, not silently papered over.
 
 ## Building (from source)
 
@@ -150,11 +162,19 @@ once the company GitHub org exists (ticket 13).
 
 ## Security
 
-- The registration token is 192 bits of `crypto/rand`, compared in
-  constant time; only its SHA-256 is kept in memory after generation.
-- TLS is enabled when a cert + key are present (the installer
-  generates a self-signed pair). For LAN use, replace with a public
-  cert or a Tailscale/Cloudflare termination; the app is
-  transport-blind (it holds an endpoint URL, not a Transport).
+- The registration token is 192 bits of `crypto/rand`. Verification
+  compares SHA-256 digests in constant time, so the raw token is never
+  touched on the request path.
+- The raw token is kept in memory only to serve `rackops-agent
+  -show-token` and the install flow; it is never written to the Agent's
+  logs, and the Agent API never returns it. Fetch it from a shell on the
+  Host itself.
+- Tokens are read from the `Authorization: Bearer` header only. There is
+  deliberately no `?token=` query parameter: a token in the request line
+  leaks into proxy logs, browser history and TLS-terminating middleware.
+- TLS is enabled when a cert + key are present (the installer generates
+  a self-signed pair). For LAN use, replace with a public cert or a
+  Tailscale/Cloudflare termination; the app is transport-blind (it holds
+  an endpoint URL, not a Transport).
 - `/health` is open by design (service-manager liveness); every
   data-bearing endpoint requires the token.

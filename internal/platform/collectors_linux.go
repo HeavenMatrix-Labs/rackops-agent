@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"rackops/agent/internal/collect"
 )
@@ -32,7 +33,7 @@ type cpuCollector struct {
 	prev totalCPU
 }
 
-func (c *cpuCollector) ID() string { return "cpu" }
+func (c *cpuCollector) ID() collect.ID { return collect.IDCPU }
 
 func (c *cpuCollector) Collect(ctx context.Context, m *collect.HostMetrics, _ *collect.HostInfo) error {
 	cur, err := readTotalCPU()
@@ -97,7 +98,7 @@ func readTotalCPU() (totalCPU, error) {
 // memoryCollector reads /proc/meminfo.
 type memoryCollector struct{}
 
-func (c *memoryCollector) ID() string { return "memory" }
+func (c *memoryCollector) ID() collect.ID { return collect.IDMemory }
 
 func (c *memoryCollector) Collect(_ context.Context, m *collect.HostMetrics, _ *collect.HostInfo) error {
 	data, err := os.ReadFile("/proc/meminfo")
@@ -138,7 +139,7 @@ func (c *memoryCollector) Collect(_ context.Context, m *collect.HostMetrics, _ *
 // using statfs for sizes.
 type diskCollector struct{}
 
-func (c *diskCollector) ID() string { return "disk" }
+func (c *diskCollector) ID() collect.ID { return collect.IDDisk }
 
 func (c *diskCollector) Collect(_ context.Context, m *collect.HostMetrics, _ *collect.HostInfo) error {
 	data, err := os.ReadFile("/proc/mounts")
@@ -184,14 +185,15 @@ func (c *diskCollector) Collect(_ context.Context, m *collect.HostMetrics, _ *co
 }
 
 // networkCollector sums byte counters across non-internal interfaces and
-// reports rates (delta since last sample).
+// reports rates (delta since last sample, divided by the elapsed time).
 type networkCollector struct {
-	prev map[string]ifaceCounters
+	prev   map[string]ifaceCounters
+	prevAt time.Time
 }
 
 type ifaceCounters struct{ in, out uint64 }
 
-func (c *networkCollector) ID() string { return "network" }
+func (c *networkCollector) ID() collect.ID { return collect.IDNetwork }
 
 func (c *networkCollector) Collect(ctx context.Context, m *collect.HostMetrics, _ *collect.HostInfo) error {
 	data, err := os.ReadFile("/proc/net/dev")
@@ -222,36 +224,42 @@ func (c *networkCollector) Collect(ctx context.Context, m *collect.HostMetrics, 
 		out, _ := strconv.ParseUint(fields[8], 10, 64)
 		cur[name] = ifaceCounters{in: in, out: out}
 	}
+
+	now := time.Now()
 	if c.prev == nil {
-		c.prev = cur
-		return nil // no rate yet
+		// First sample: there is no interval to divide by yet. Record
+		// the baseline and report a zero rate rather than pretending
+		// the cumulative counters are a rate.
+		c.prev, c.prevAt = cur, now
+		return nil
 	}
+	elapsed := now.Sub(c.prevAt).Seconds()
 	var in, out uint64
-	for name, c2 := range cur {
+	for name, cur2 := range cur {
 		if p, ok := c.prev[name]; ok {
-			if c2.in >= p.in {
-				in += c2.in - p.in
+			if cur2.in >= p.in {
+				in += cur2.in - p.in
 			}
-			if c2.out >= p.out {
-				out += c2.out - p.out
+			if cur2.out >= p.out {
+				out += cur2.out - p.out
 			}
 		}
 	}
-	c.prev = cur
-	// We don't track wall-clock between samples here; the API layer sets
-	// the sample interval. For a one-shot /metrics call we report a
-	// cumulative rate approximation: zero on the first, real rate later.
-	// The stream endpoint drives this at a fixed cadence, so the delta
-	// over the stream interval is the rate.
-	m.Network.BytesInPerSecond = float64(in)
-	m.Network.BytesOutPerSecond = float64(out)
+	c.prev, c.prevAt = cur, now
+	if elapsed <= 0 {
+		m.Network.BytesInPerSecond = 0
+		m.Network.BytesOutPerSecond = 0
+		return nil
+	}
+	m.Network.BytesInPerSecond = float64(in) / elapsed
+	m.Network.BytesOutPerSecond = float64(out) / elapsed
 	return nil
 }
 
 // temperatureCollector reads /sys/class/thermal/thermal_zone* and hwmon.
 type temperatureCollector struct{}
 
-func (c *temperatureCollector) ID() string { return "temperature" }
+func (c *temperatureCollector) ID() collect.ID { return collect.IPTemperature }
 
 func (c *temperatureCollector) Collect(_ context.Context, m *collect.HostMetrics, _ *collect.HostInfo) error {
 	zones, err := os.ReadDir("/sys/class/thermal")
@@ -284,7 +292,7 @@ func (c *temperatureCollector) Collect(_ context.Context, m *collect.HostMetrics
 // uptimeCollector reads /proc/uptime.
 type uptimeCollector struct{}
 
-func (c *uptimeCollector) ID() string { return "uptime" }
+func (c *uptimeCollector) ID() collect.ID { return collect.IDUptime }
 
 func (c *uptimeCollector) Collect(_ context.Context, m *collect.HostMetrics, info *collect.HostInfo) error {
 	data, err := os.ReadFile("/proc/uptime")
@@ -308,7 +316,7 @@ func (c *uptimeCollector) Collect(_ context.Context, m *collect.HostMetrics, inf
 // block devices, board/vendor (best effort from DMI).
 type hardwareCollector struct{}
 
-func (c *hardwareCollector) ID() string { return "hardware" }
+func (c *hardwareCollector) ID() collect.ID { return collect.IDHardware }
 
 func (c *hardwareCollector) Collect(_ context.Context, m *collect.HostMetrics, info *collect.HostInfo) error {
 	info.Hardware.NumCPU = numCPU()
@@ -389,10 +397,10 @@ func blockDevices() []collect.HDDisk {
 			rot = strings.TrimSpace(string(f)) == "1"
 		}
 		out = append(out, collect.HDDisk{
-			Name:    name,
-			Model:   model,
-			Size:    size * 512,
-			IsSSD:   !rot,
+			Name:  name,
+			Model: model,
+			Size:  size * 512,
+			IsSSD: !rot,
 		})
 	}
 	return out

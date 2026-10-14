@@ -4,8 +4,8 @@ package platform
 
 import (
 	"context"
-	"testing"
 	"runtime"
+	"testing"
 
 	"rackops/agent/internal/collect"
 )
@@ -31,7 +31,7 @@ func TestAllCollectorsHaveUniqueIDs(t *testing.T) {
 func TestHostinfoCollectorFillsBaseline(t *testing.T) {
 	var m collect.HostMetrics
 	var info collect.HostInfo
-	if err := baseCollector{}.Collect(context.Background(), &m, &info); err != nil {
+	if err := (baseCollector{}).Collect(context.Background(), &m, &info); err != nil {
 		t.Fatalf("hostinfo: %v", err)
 	}
 	if info.Hostname == "" {

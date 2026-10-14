@@ -15,25 +15,25 @@ import (
 // kernel32 + Win32 P/Invoke, stdlib-only. The agent uses NewLazyDLL so
 // no extra module is needed on Windows.
 var (
-	kernel32            = syscall.NewLazyDLL("kernel32.dll")
-	procGlobalMemoryStatusEx = kernel32.NewProc("GlobalMemoryStatusEx")
-	procGetSystemTimes   = kernel32.NewProc("GetSystemTimes")
-	procGetTickCount64   = kernel32.NewProc("GetTickCount64")
-	procGetDiskFreeSpaceExW = kernel32.NewProc("GetDiskFreeSpaceExW")
-	procGetLogicalDriveStringsW = kernel32.NewProc("GetLogicalDriveStringsW")
+	kernel32                     = syscall.NewLazyDLL("kernel32.dll")
+	procGlobalMemoryStatusEx     = kernel32.NewProc("GlobalMemoryStatusEx")
+	procGetSystemTimes           = kernel32.NewProc("GetSystemTimes")
+	procGetTickCount64           = kernel32.NewProc("GetTickCount64")
+	procGetDiskFreeSpaceExW      = kernel32.NewProc("GetDiskFreeSpaceExW")
+	procGetLogicalDriveStringsW  = kernel32.NewProc("GetLogicalDriveStringsW")
 	procGetLogicalCPUInformation = kernel32.NewProc("GetLogicalProcessorInformation")
 )
 
 // MEMORYSTATUSEx mirrors the Win32 struct (16 bytes + 1 DWORD padding).
 type memoryStatusEx struct {
-	Length         uint32
-	MemoryLoad     uint32
-	TotalPhys      uint64
-	AvailPhys      uint64
-	TotalPageFile  uint64
-	AvailPageFile  uint64
-	TotalVirtual   uint64
-	AvailExtended  uint64
+	Length                uint32
+	MemoryLoad            uint32
+	TotalPhys             uint64
+	AvailPhys             uint64
+	TotalPageFile         uint64
+	AvailPageFile         uint64
+	TotalVirtual          uint64
+	AvailExtended         uint64
 	AvailExtendedReserved uint64
 }
 
@@ -45,7 +45,7 @@ type fileTime struct {
 // uptimeCollector reads the system's up time in milliseconds.
 type uptimeCollector struct{}
 
-func (c *uptimeCollector) ID() string { return "uptime" }
+func (c *uptimeCollector) ID() collect.ID { return collect.IDUptime }
 
 func (c *uptimeCollector) Collect(_ context.Context, m *collect.HostMetrics, info *collect.HostInfo) error {
 	r, _, _ := procGetTickCount64.Call()
@@ -63,7 +63,7 @@ type cpuCollector struct {
 	prevIdle, prevKernel, prevUser uint64
 }
 
-func (c *cpuCollector) ID() string { return "cpu" }
+func (c *cpuCollector) ID() collect.ID { return collect.IDCPU }
 
 func (c *cpuCollector) Collect(_ context.Context, m *collect.HostMetrics, _ *collect.HostInfo) error {
 	var idle, kernel, user fileTime
@@ -100,7 +100,7 @@ func filetime(ft *fileTime) uint64 {
 // memoryCollector reports physical memory via GlobalMemoryStatusEx.
 type memoryCollector struct{}
 
-func (c *memoryCollector) ID() string { return "memory" }
+func (c *memoryCollector) ID() collect.ID { return collect.IDMemory }
 
 func (c *memoryCollector) Collect(_ context.Context, m *collect.HostMetrics, _ *collect.HostInfo) error {
 	var st memoryStatusEx
@@ -118,7 +118,7 @@ func (c *memoryCollector) Collect(_ context.Context, m *collect.HostMetrics, _ *
 // capacity via GetDiskFreeSpaceExW.
 type diskCollector struct{}
 
-func (c *diskCollector) ID() string { return "disk" }
+func (c *diskCollector) ID() collect.ID { return collect.IDDisk }
 
 func (c *diskCollector) Collect(_ context.Context, m *collect.HostMetrics, _ *collect.HostInfo) error {
 	buf := make([]uint16, 512)
@@ -162,7 +162,7 @@ func (c *diskCollector) Collect(_ context.Context, m *collect.HostMetrics, _ *co
 // marks the slice unavailable with a reason so the app degrades gracefully.
 type networkCollector struct{}
 
-func (c *networkCollector) ID() string { return "network" }
+func (c *networkCollector) ID() collect.ID { return collect.IDNetwork }
 
 func (c *networkCollector) Collect(_ context.Context, _ *collect.HostMetrics, _ *collect.HostInfo) error {
 	return fmt.Errorf("windows network: not available in stdlib-only build")
@@ -174,7 +174,7 @@ func (c *networkCollector) Collect(_ context.Context, _ *collect.HostMetrics, _ 
 // gracefully".
 type temperatureCollector struct{}
 
-func (c *temperatureCollector) ID() string { return "temperature" }
+func (c *temperatureCollector) ID() collect.ID { return collect.IPTemperature }
 
 func (c *temperatureCollector) Collect(_ context.Context, _ *collect.HostMetrics, _ *collect.HostInfo) error {
 	return fmt.Errorf("windows temperature: not available on this Host")
@@ -185,7 +185,7 @@ func (c *temperatureCollector) Collect(_ context.Context, _ *collect.HostMetrics
 // doesn't link, so those fields stay empty / unavailable.
 type hardwareCollector struct{}
 
-func (c *hardwareCollector) ID() string { return "hardware" }
+func (c *hardwareCollector) ID() collect.ID { return collect.IDHardware }
 
 func (c *hardwareCollector) Collect(_ context.Context, m *collect.HostMetrics, info *collect.HostInfo) error {
 	info.Hardware.NumCPU = runtime.NumCPU()

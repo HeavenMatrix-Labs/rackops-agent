@@ -45,12 +45,12 @@ import (
 // version is stamped at release-build time via -ldflags "-X main.version=...".
 var version = "0.2.0"
 
-// privilegedCollectorIDs are the Collector IDs that need privileges on
-// some platforms (root on Linux/macOS for temperature sensors). Limited
-// mode skips these so the Agent can run unprivileged and the app marks
-// the corresponding features "not available on this Host".
-var privilegedCollectorIDs = map[string]bool{
-	"temperature": true,
+// privilegedCollectorIDs are the slices that need privileges on some
+// platforms (root on Linux/macOS for temperature sensors). Limited mode
+// skips these so the Agent can run unprivileged and the app marks the
+// corresponding features "not available on this Host".
+var privilegedCollectorIDs = map[collect.ID]bool{
+	collect.IPTemperature: true,
 }
 
 func main() {
@@ -151,11 +151,13 @@ func main() {
 		log.Info("rackops-agent listening", "addr", *addrFlag, "tls", true)
 		if err := serveTLS(ln, server.Handler(), cert); err != nil {
 			log.Error("server error", "err", err)
+			os.Exit(1)
 		}
 	} else {
 		log.Info("rackops-agent listening (plain HTTP - no TLS cert configured)", "addr", *addrFlag)
 		if err := servePlain(ln, server.Handler()); err != nil {
 			log.Error("server error", "err", err)
+			os.Exit(1)
 		}
 	}
 }
@@ -211,10 +213,12 @@ func loadOrCreateToken(tokenFilePath string, log *slog.Logger) (api.Token, error
 	if err := os.WriteFile(path, []byte(tok.String()), 0o600); err != nil {
 		return api.Token{}, err
 	}
-	// Log the token so the install flow can display it to the user.
-	// (On a real host the installer captures stdout; the token also
-	// persists across restarts via the file above.)
-	log.Info("rackops-agent generated registration token", "path", path, "token", tok.String())
+	// Log where the token landed so the install flow can surface it, but
+	// not the secret itself: stderr is routinely captured into journald /
+	// launchd logs that outlive the process, and the token is the only
+	// thing guarding the Agent API. `rackops-agent -show-token` prints
+	// it on demand, on a machine the user is already logged into.
+	log.Info("rackops-agent generated registration token", "path", path, "hint", "run: rackops-agent -show-token")
 	return tok, nil
 }
 

@@ -24,12 +24,14 @@ import (
 	"rackops/agent/internal/collect"
 )
 
-// Token is the per-host registration secret. Generated on first run, printed
-// once by the install flow, and echoed by GET /token so the user can paste
-// it into the app.
+// Token is the per-Host registration secret. It is generated on first run
+// and persisted (see cmd/agent), so the app and the Agent agree on it.
+// The raw value is retained because `-show-token` and the install flow
+// need to display it to the user; verification compares SHA-256 digests
+// in constant time, so the raw value is never used on the request path.
 type Token struct {
 	raw    string
-	sha256 string // compare against this, so we never store/compare raw
+	sha256 string
 }
 
 // NewToken generates a random registration token.
@@ -53,7 +55,7 @@ func (t Token) Verify(presented string) bool {
 	return subtle.ConstantTimeCompare([]byte(hex.EncodeToString(sum[:])), []byte(t.sha256)) == 1
 }
 
-// LoadToken re-hydrates a persisted token (raw base64 string) so the agent
+// LoadToken re-hydrates a persisted token (raw base64 string) so the Agent
 // can verify requests across restarts without regenerating.
 func LoadToken(raw string) (Token, error) {
 	if raw == "" {
@@ -109,7 +111,6 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/health", s.handleHealth)
-	mux.HandleFunc("/token", s.requireToken(s.handleToken))
 	mux.HandleFunc("/api/v1/info", s.requireToken(s.handleInfo))
 	mux.HandleFunc("/api/v1/metrics", s.requireToken(s.handleMetrics))
 	mux.HandleFunc("/api/v1/metrics/stream", s.requireToken(s.handleStream))
@@ -122,23 +123,13 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("ok"))
 }
 
-// handleToken prints the registration token. This endpoint is token-gated
-// (you must already hold the token) to prevent an unauthenticated network
-// scan from reading the secret; the install flow displays it out-of-band
-// instead.
-func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
-	_ = json.NewEncoder(w).Encode(map[string]string{
-		"token": s.token.String(),
-	})
-}
-
 func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 	snap := s.set.Collect(r.Context())
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"version": s.version,
-		"agent":   "rackops-agent",
-		"info":    snap.Info,
+		"version":  s.version,
+		"agent":    "rackops-agent",
+		"info":     snap.Info,
 		"features": snap.Features,
 	})
 }
@@ -189,11 +180,12 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) requireToken(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// The token is read from the Authorization header only. A
+		// ?token= query fallback was tempting for clients that cannot set
+		// headers, but it writes the secret into the request line, where
+		// it lands in proxy logs, browser history and TLS-terminating
+		// middleware logs. The app sets the header; it always can.
 		presented := r.Header.Get("Authorization")
-		if presented == "" {
-			// also accept ?token= for clients that can't set headers
-			presented = r.URL.Query().Get("token")
-		}
 		const prefix = "Bearer "
 		if len(presented) > len(prefix) && presented[:len(prefix)] == prefix {
 			presented = presented[len(prefix):]

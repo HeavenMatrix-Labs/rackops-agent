@@ -19,12 +19,12 @@ import (
 // fixed slice of the snapshot and never errors, so the API tests exercise
 // the API, not the platform code.
 type fakeCollector struct {
-	id     string
+	id      collect.ID
 	failure error
-	mutate func(m *collect.HostMetrics, info *collect.HostInfo)
+	mutate  func(m *collect.HostMetrics, info *collect.HostInfo)
 }
 
-func (f *fakeCollector) ID() string { return f.id }
+func (f *fakeCollector) ID() collect.ID { return f.id }
 
 func (f *fakeCollector) Collect(ctx context.Context, m *collect.HostMetrics, info *collect.HostInfo) error {
 	if f.failure != nil {
@@ -327,6 +327,46 @@ func TestStreamRejectsBadToken(t *testing.T) {
 	}
 	if resp != nil && resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("upgrade status = %d, want 401", resp.StatusCode)
+	}
+}
+
+func TestTokenInQueryStringIsRejected(t *testing.T) {
+	// A token in the query string leaks into proxy logs, browser
+	// history and TLS-terminating middleware. The API must not accept
+	// it, even though accepting it would be convenient.
+	set := collect.NewCollectorSet(&fakeCollector{id: collect.IDCPU})
+	tok := mustToken(t)
+	srv := newTestServer(t, set, tok)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/api/v1/metrics?token=" + tok.String())
+	if err != nil {
+		t.Fatalf("GET metrics?token=: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("query-string token status = %d, want 401", resp.StatusCode)
+	}
+}
+
+func TestTokenEndpointDoesNotExist(t *testing.T) {
+	// There is no endpoint that hands the raw token back over the wire,
+	// even to an authenticated caller: a network-level token exfiltration
+	// primitive is not something the Agent API needs.
+	set := collect.NewCollectorSet()
+	tok := mustToken(t)
+	srv := newTestServer(t, set, tok)
+	defer srv.Close()
+
+	req, _ := http.NewRequest("GET", srv.URL+"/token", nil)
+	req.Header.Set("Authorization", "Bearer "+tok.String())
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /token: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("/token status = %d, want 404", resp.StatusCode)
 	}
 }
 

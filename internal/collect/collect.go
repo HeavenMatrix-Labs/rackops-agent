@@ -1,5 +1,5 @@
 // Package collect defines the Collector seam: the Agent's units of work that
-// gather host metrics and specs. The Agent API is tested behind this seam with
+// gather Host metrics and specs. The Agent API is tested behind this seam with
 // fake Collectors; real platform Collectors live under internal/platform.
 //
 // A Collector collects one narrow slice of host data (CPU, memory, disks,
@@ -11,16 +11,41 @@ package collect
 
 import (
 	"context"
+	"sync"
 	"time"
 )
 
-// Collector gathers one slice of host data. Implementations must be safe for
-// concurrent use: the API and the metrics stream sample Collectors on
-// overlapping schedules.
+// ID names one slice of Host data a Collector is responsible for.
+// It is a type, not a bare string, because IDs cross three boundaries
+// (the Collector's ID method, CollectorSet.Skip, and the Agent's
+// limited-mode list) where a typo would silently disable a slice
+// instead of failing to compile.
+type ID string
+
+// The slices the Agent reports. A platform Collectors() returns one
+// Collector per slice it can serve.
+const (
+	IDHostInfo    ID = "hostinfo"
+	IDCPU         ID = "cpu"
+	IDMemory      ID = "memory"
+	IDDisk        ID = "disk"
+	IDNetwork     ID = "network"
+	IPTemperature ID = "temperature"
+	IDUptime      ID = "uptime"
+	IDHardware    ID = "hardware"
+)
+
+func (id ID) String() string { return string(id) }
+
+// Collector gathers one slice of Host data. Implementations must be safe
+// for concurrent use: the API and the metrics stream sample Collectors on
+// overlapping schedules. CollectorSet.Collect serializes its callers, so
+// an implementation that keeps state between calls (a rate computed from
+// the previous sample, say) does not need its own lock.
 type Collector interface {
 	// ID is the stable, app-facing identifier of the slice, e.g. "cpu",
 	// "memory", "disk", "network", "temperature", "uptime", "hardware".
-	ID() string
+	ID() ID
 
 	// Collect fills in the collector's slice of the HostMetrics and
 	// HostInfo structs. Collectors leave the other fields untouched.
@@ -29,7 +54,7 @@ type Collector interface {
 	Collect(ctx context.Context, m *HostMetrics, info *HostInfo) error
 }
 
-// HostMetrics is one sample of a host's live metrics. All numeric fields use
+// HostMetrics is one sample of a Host's live metrics. All numeric fields use
 // absolute units (bytes, hertz, celsius) so the app never has to guess.
 // A field is present when its Collector ran; a Collector may leave a slice
 // zero and report it unavailable via Feature.Available.
@@ -48,7 +73,7 @@ type HostMetrics struct {
 		UsedBytes  uint64 `json:"usedBytes"`
 	} `json:"memory"`
 
-	// Disks is one entry per mounted filesystem the agent reports on.
+	// Disks is one entry per mounted filesystem the Agent reports on.
 	Disks []Disk `json:"disks"`
 
 	// Network is aggregate traffic across non-internal interfaces, bytes.
@@ -103,10 +128,10 @@ type Hardware struct {
 
 // HDDisk is a block device, not a mount.
 type HDDisk struct {
-	Name    string `json:"name"`
-	Model   string `json:"model,omitempty"`
-	Size    uint64 `json:"sizeBytes"`
-	IsSSD   bool   `json:"isSsd"`
+	Name  string `json:"name"`
+	Model string `json:"model,omitempty"`
+	Size  uint64 `json:"sizeBytes"`
+	IsSSD bool   `json:"isSsd"`
 }
 
 // Feature reports whether a collector ran on this host in the current mode.
@@ -118,7 +143,7 @@ type Feature struct {
 	Reason string `json:"reason,omitempty"`
 }
 
-// Features is the per-host map of feature availability the Agent API
+// Features is the per-Host map of feature availability the Agent API
 // publishes.
 type Features map[string]Feature
 
@@ -136,50 +161,71 @@ type Snapshot struct {
 // CollectorSet aggregates Collectors into a Snapshot and tracks which
 // collectors were skipped at construction time (limited mode, platform
 // without sensors, ...) so they surface in Features as unavailable.
+//
+// Collect serializes concurrent callers with a single lock. Several
+// Collectors (CPU, network) compute a rate from a delta against their
+// own previous sample, so they keep mutable state between calls; two
+// overlapping Collect calls would race on that state and interleave
+// two snapshots into one. Serializing here, once, is what makes the
+// Collector interface's "safe for concurrent use" contract true for
+// every implementation instead of asking each Collector to lock.
 type CollectorSet struct {
 	collectors []Collector
-	skipped    map[string]string
+	skipped    map[ID]string
+
+	mu sync.Mutex
 }
 
 // NewCollectorSet builds a set from the given Collectors.
 func NewCollectorSet(cs ...Collector) *CollectorSet {
 	return &CollectorSet{
 		collectors: cs,
-		skipped:    map[string]string{},
+		skipped:    map[ID]string{},
 	}
 }
 
 // Skip records that the collector with id was skipped and why.
-func (s *CollectorSet) Skip(id, reason string) {
+func (s *CollectorSet) Skip(id ID, reason string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.skipped[id] = reason
 }
 
 // Collect runs every collector and produces one Snapshot. An error from one
 // collector does not stop the others: that collector's feature is marked
 // unavailable with the error as reason.
+//
+// Collect is safe to call from multiple goroutines; callers are
+// serialized.
 func (s *CollectorSet) Collect(ctx context.Context) Snapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	var m HostMetrics
 	var info HostInfo
 	features := Features{}
 	m.Timestamp = time.Now().UnixMilli()
 
 	for _, c := range s.collectors {
+		id := c.ID().String()
 		if reason, ok := s.skipped[c.ID()]; ok {
-			features[c.ID()] = Feature{Available: false, Reason: reason}
+			features[id] = Feature{Available: false, Reason: reason}
 			continue
 		}
 		if err := c.Collect(ctx, &m, &info); err != nil {
-			features[c.ID()] = Feature{Available: false, Reason: err.Error()}
+			features[id] = Feature{Available: false, Reason: err.Error()}
 			continue
 		}
-		features[c.ID()] = Feature{Available: true}
+		features[id] = Feature{Available: true}
 	}
 	return Snapshot{Metrics: m, Info: info, Features: features}
 }
 
 // IDs returns every collector ID in the set (running and skipped).
-func (s *CollectorSet) IDs() []string {
-	out := make([]string, 0, len(s.collectors))
+func (s *CollectorSet) IDs() []ID {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]ID, 0, len(s.collectors))
 	for _, c := range s.collectors {
 		out = append(out, c.ID())
 	}

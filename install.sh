@@ -18,6 +18,7 @@
 set -euo pipefail
 
 VERSION="${VERSION:-latest}"
+# -mode takes "full" or "limited"; the empty default means full.
 LIMITED=""
 USER_SERVICE=""
 CERT=""
@@ -26,7 +27,7 @@ KEY=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --version) VERSION="$2"; shift 2 ;;
-    --limited) LIMITED="1"; shift ;;
+    --limited) LIMITED="limited"; shift ;;
     --user) USER_SERVICE="1"; shift ;;
     --cert) CERT="$2"; shift 2 ;;
     --key) KEY="$2"; shift 2 ;;
@@ -40,36 +41,60 @@ OS="$(uname -s)"
 
 echo "==> Installing rackops-agent ${VERSION}"
 
+WORKDIR="$(mktemp -d)"
+trap 'rm -rf "${WORKDIR}"' EXIT
+
 # Acquire the binary: GitHub release when live (ticket 13 creates the
-# org), else build from source in this repo.
-if [[ ! -f "dist/${BINARY}" ]]; then
+# org), else build from source in this checkout.
+if [[ ! -x "${PWD}/${BINARY}" ]]; then
   ARCH=$(uname -m)
   case "$ARCH" in
     x86_64|amd64) ARCH=amd64 ;;
     aarch64|arm64) ARCH=arm64 ;;
     armv7l) ARCH=arm ;;
-    *) echo "unsupported arch ${ARCH}"; exit 1 ;;
+    *) echo "unsupported arch ${ARCH}" >&2; exit 1 ;;
   esac
   echo "    downloading agent-${ARCH} ..."
   # The release URL is a placeholder until ticket 13 creates the company
-  # GitHub org; until then, build from source in this repo.
-  RELEASE_URL="https://github.com/<org>/rackops-agent/releases/download/${VERSION}/${BINARY}-linux-${ARCH}"
-  if curl -fsSL "$RELEASE_URL" -o "dist/${BINARY}" 2>/dev/null; then
-    :
-  else
-    echo "    (release URL not yet live - building from source in agent/)"
-    ( cd agent && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o "dist/${BINARY}" ./cmd/agent )
+  # GitHub org. Until then this only succeeds from inside a source
+  # checkout, which is how we test the flow before the org exists.
+  RELEASE_URL="${RACKOPS_AGENT_RELEASE_BASE:-https://github.com/rackops/rackops-agent/releases/download}/${VERSION}/${BINARY}-linux-${ARCH}"
+  if ! curl -fsSL "$RELEASE_URL" -o "${WORKDIR}/${BINARY}" 2>/dev/null; then
+    echo "    (no published release at ${RELEASE_URL})"
+    SRC="$(pwd)"
+    if [[ ! -d "${SRC}/agent/cmd/agent" ]]; then
+      echo "ERROR: could not download the Agent and no agent/ source tree is" >&2
+      echo "       present in ${SRC}. Run this from a RackOps checkout, or set" >&2
+      echo "       RACKOPS_AGENT_RELEASE_BASE to a release mirror." >&2
+      exit 1
+    fi
+    echo "    building from source in agent/ ..."
+    ( cd "${SRC}/agent" && CGO_ENABLED=0 go build -trimpath \
+        -ldflags "-s -w -X main.version=${VERSION}" \
+        -o "${WORKDIR}/${BINARY}" ./cmd/agent )
   fi
+  chmod +x "${WORKDIR}/${BINARY}"
 fi
+
+# Installing over a running binary fails with ETXTBSY; stop it first.
+# This is also the in-place update path: the unit is re-enabled below.
+if [[ "$OS" != "Darwin" ]]; then
+  systemctl stop "${UNIT}" 2>/dev/null || true
+  systemctl --user stop "${UNIT}" 2>/dev/null || true
+fi
+
+SRC_BINARY="${PWD}/${BINARY}"
+[[ -x "${SRC_BINARY}" ]] || SRC_BINARY="${WORKDIR}/${BINARY}"
 
 if [[ "$OS" == "Darwin" ]]; then
   echo "==> Installing launchd user service"
   mkdir -p "${HOME}/.local/bin"
-  install -m 0755 "dist/${BINARY}" "${HOME}/.local/bin/${BINARY}"
+  install -m 0755 "${SRC_BINARY}" "${HOME}/.local/bin/${BINARY}"
   PLIST="${HOME}/Library/LaunchAgents/com.rackops.agent.plist"
   mkdir -p "${HOME}/Library/LaunchAgents"
   if [[ -z "$CERT" ]]; then CERT="${HOME}/.config/rackops/tls.crt"; fi
   if [[ -z "$KEY" ]]; then KEY="${HOME}/.config/rackops/tls.key"; fi
+  TOKEN_FILE="${HOME}/.config/rackops/token"
   mkdir -p "$(dirname "$CERT")"
   if [[ ! -f "$CERT" ]]; then
     echo "    generating self-signed TLS cert"
@@ -91,6 +116,7 @@ if [[ "$OS" == "Darwin" ]]; then
     <string>-addr</string><string>:8443</string>
     <string>-tls-cert</string><string>${CERT}</string>
     <string>-tls-key</string><string>${KEY}</string>
+    <string>-token</string><string>${TOKEN_FILE}</string>
     <string>-mode</string><string>${LIMITED:-full}</string>
   </array>
   <key>RunAtLoad</key>
@@ -111,7 +137,7 @@ else
   fi
   echo "==> Installing binary to ${PREFIX}/bin"
   mkdir -p "${PREFIX}/bin"
-  install -m 0755 "dist/${BINARY}" "${PREFIX}/bin/${BINARY}"
+  install -m 0755 "${SRC_BINARY}" "${PREFIX}/bin/${BINARY}"
   BIN_PATH="${PREFIX}/bin/${BINARY}"
 
   # Token + TLS state dir.
@@ -120,6 +146,7 @@ else
   else
     STATE_DIR="/var/lib/rackops"
   fi
+  TOKEN_FILE="${STATE_DIR}/token"
   if [[ -z "$CERT" ]]; then CERT="${STATE_DIR}/tls.crt"; fi
   if [[ -z "$KEY" ]]; then KEY="${STATE_DIR}/tls.key"; fi
   mkdir -p "$STATE_DIR"
@@ -131,13 +158,17 @@ else
     chmod 0600 "$KEY"; chmod 0644 "$CERT"
   fi
 
+  # -token points the running Agent at the same token file the installer
+  # reads back below. Without it the Agent would fall back to its own
+  # $HOME-based path, which under systemd is neither the state dir nor
+  # the file the user was shown.
   UNIT_CONTENT="[Unit]
 Description=RackOps Agent
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=${BIN_PATH} -addr :8443 -tls-cert ${CERT} -tls-key ${KEY} -mode ${LIMITED:-full}
+ExecStart=${BIN_PATH} -addr :8443 -tls-cert ${CERT} -tls-key ${KEY} -token ${TOKEN_FILE} -mode ${LIMITED:-full}
 Restart=on-failure
 RestartSec=2
 StateDirectory=rackops"
@@ -147,7 +178,8 @@ StateDirectory=rackops"
     mkdir -p "${HOME}/.config/systemd/user"
     echo "$UNIT_CONTENT" > "${HOME}/.config/systemd/user/${UNIT}"
     systemctl --user daemon-reload
-    systemctl --user enable --now "${UNIT}" 2>/dev/null || true
+    systemctl --user enable --now "${UNIT}"
+  else
   else
     echo "==> Installing system systemd service"
     echo "$UNIT_CONTENT" > "/etc/systemd/system/${UNIT}"
@@ -156,15 +188,23 @@ StateDirectory=rackops"
   fi
 fi
 
-# Print the token. The agent persists it to its standard location on
-# first start; `rackops-agent -show-token` reads it back, so the
-# installer can display it to the user without scraping service logs.
-TOKEN="$(${BIN_PATH} -show-token 2>/dev/null || true)"
+# Mint (or reuse) the registration token at exactly the path the service
+# was pointed at, then print it. Reading the token the Agent will
+# actually use matters: a token shown from a different file is a Host
+# the app can never reach, and the symptom (every call 401s) is not
+# something a user can diagnose from the app.
+TOKEN="$(${BIN_PATH} -show-token -token "${TOKEN_FILE}" 2>/dev/null || true)"
+if [[ -z "${TOKEN}" ]]; then
+  echo "ERROR: could not read or create the registration token at ${TOKEN_FILE}" >&2
+  echo "       The Agent is installed but the app will not be able to reach it." >&2
+  exit 1
+fi
+
 echo
 echo "==> rackops-agent is installed and running."
 echo
-echo "Registration token:"
-echo "  ${TOKEN:-<not yet generated>}"
+echo "Registration token (also at ${TOKEN_FILE}):"
+echo "  ${TOKEN}"
 echo
 echo "Add this Host in the RackOps app by pasting the token, or point your"
 echo "phone at https://<this-host>:8443 over your chosen Transport."
