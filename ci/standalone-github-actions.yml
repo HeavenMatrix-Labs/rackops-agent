@@ -1,0 +1,85 @@
+# Template for the standalone rackops-agent repo's CI.
+#
+# This file is NOT a live workflow in the monorepo: GitHub only reads
+# .github/workflows/ at the repository root, so anything under
+# agent/.github/ would silently never run. When the Agent is split into
+# its own repo (HeavenMatrix-Labs/rackops-agent), copy this to
+# .github/workflows/ci.yml there:
+#
+#   cp ci/standalone-github-actions.yml .github/workflows/ci.yml
+#
+# The paths differ between the two layouts, which is why it is a
+# template and not shared verbatim:
+#   - monorepo:  the Agent lives in agent/, so jobs use
+#                `working-directory: agent`
+#   - standalone: the Agent is the repository root, so jobs run from .
+#
+# Keep the two in sync: the Agent code is one codebase, and a fix that
+# passes in one layout must pass in the other.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  agent:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      # Unit tests plus the Agent-API-with-fake-Collectors suite.
+      # -race here is what guards the CollectorSet concurrency contract:
+      # the metrics handlers and the WebSocket stream sample Collectors
+      # from independent goroutines.
+      - name: Test
+        run: go test -race ./...
+
+      # The spec's integration bar: a real Agent build, a local port, a
+      # token, and one metrics call - no real homelab required.
+      - name: Smoke test against a real Agent build
+        run: go test -count=1 -v ./internal/smoke/...
+
+      - name: Build matrix (6 platforms)
+        run: |
+          set -e
+          mkdir -p dist
+          for goos in linux windows darwin; do
+            for goarch in amd64 arm64; do
+              ext=""
+              [ "$goos" = "windows" ] && ext=".exe"
+              CGO_ENABLED=0 GOOS=$goos GOARCH=$goarch go build -trimpath \
+                -ldflags "-s -w -X main.version=${GITHUB_REF_NAME:-dev}" \
+                -o "dist/rackops-agent-${goos}-${goarch}${ext}" ./cmd/agent
+            done
+          done
+          ls -la dist/
+
+      - name: Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: rackops/agent:dev
+
+  # install.sh is the thing users pipe into bash; a syntax error here
+  # breaks every install. Cheap to check, embarrassing to ship broken.
+  scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Shellcheck
+        run: |
+          sudo apt-get update && sudo apt-get install -y shellcheck
+          shellcheck install.sh uninstall.sh

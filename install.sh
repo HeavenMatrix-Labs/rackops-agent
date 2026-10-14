@@ -180,7 +180,6 @@ StateDirectory=rackops"
     systemctl --user daemon-reload
     systemctl --user enable --now "${UNIT}"
   else
-  else
     echo "==> Installing system systemd service"
     echo "$UNIT_CONTENT" > "/etc/systemd/system/${UNIT}"
     systemctl daemon-reload
