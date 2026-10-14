@@ -26,7 +26,7 @@ stays a small static executable.
 **Linux (systemd, root by default):**
 
 ```sh
-git clone https://github.com/<org>/rack_ops && cd rack_ops
+git clone https://github.com/heavenmatrixtechsolutions/rack_ops && cd rack_ops
 sudo ./agent/install.sh            # [--limited] [--user] [--version vX.Y.Z]
 ```
 
@@ -45,9 +45,10 @@ agent\install\windows-service.bat
 
 All three write a self-signed TLS pair (Linux/macOS via `openssl`,
 Windows via `openssl` if present), register the service, and print the
-registration token. Before the release pipeline exists the installer
-builds from the `agent/` source tree; set `RACKOPS_AGENT_RELEASE_BASE`
-to a release mirror to download instead.
+registration token. Binary releases are published from
+`heavenmatrixtechsolutions/rackops-agent`; before that repo has a
+release the installer builds from the `agent/` source tree, and
+`RACKOPS_AGENT_RELEASE_BASE` overrides the download location.
 
 Paste that token into the RackOps app (Hosts → Add → Agent) to add the
 Host to your Lab. The token persists on the Host across restarts; read
