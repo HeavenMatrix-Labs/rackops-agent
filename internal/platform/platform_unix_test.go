@@ -16,14 +16,14 @@ import (
 
 func TestAllCollectorsHaveUniqueIDs(t *testing.T) {
 	set := collect.NewCollectorSet(allCollectors()...)
-	seen := map[string]bool{}
+	seen := map[collect.ID]bool{}
 	for _, id := range set.IDs() {
 		if seen[id] {
 			t.Fatalf("duplicate collector id %q", id)
 		}
 		seen[id] = true
 	}
-	if !seen["cpu"] || !seen["memory"] || !seen["disk"] {
+	if !seen[collect.IDCPU] || !seen[collect.IDMemory] || !seen[collect.IDDisk] {
 		t.Fatalf("missing base collector ids: %v", set.IDs())
 	}
 }
