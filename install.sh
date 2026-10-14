@@ -55,10 +55,10 @@ if [[ ! -x "${PWD}/${BINARY}" ]]; then
     *) echo "unsupported arch ${ARCH}" >&2; exit 1 ;;
   esac
   echo "    downloading agent-${ARCH} ..."
-  # The release URL is a placeholder until ticket 13 creates the company
-  # GitHub org. Until then this only succeeds from inside a source
-  # checkout, which is how we test the flow before the org exists.
-  RELEASE_URL="${RACKOPS_AGENT_RELEASE_BASE:-https://github.com/rackops/rackops-agent/releases/download}/${VERSION}/${BINARY}-linux-${ARCH}"
+  # The release URL points at the company GitHub org, which ticket 13
+  # creates; until it exists the download fails and we fall back to a
+  # source build. Override with RACKOPS_AGENT_RELEASE_BASE.
+  RELEASE_URL="${RACKOPS_AGENT_RELEASE_BASE:-https://github.com/<org>/rackops-agent/releases/download}/${VERSION}/${BINARY}-linux-${ARCH}"
   if ! curl -fsSL "$RELEASE_URL" -o "${WORKDIR}/${BINARY}" 2>/dev/null; then
     echo "    (no published release at ${RELEASE_URL})"
     SRC="$(pwd)"

@@ -26,7 +26,7 @@ stays a small static executable.
 **Linux (systemd, root by default):**
 
 ```sh
-git clone https://github.com/rackops/rack_ops && cd rack_ops
+git clone https://github.com/<org>/rack_ops && cd rack_ops
 sudo ./agent/install.sh            # [--limited] [--user] [--version vX.Y.Z]
 ```
 
