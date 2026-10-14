@@ -56,9 +56,9 @@ if [[ ! -x "${PWD}/${BINARY}" ]]; then
   esac
   echo "    downloading agent-${ARCH} ..."
   # The release URL points at the company GitHub org
-  # (heavenmatrixtechsolutions); releases are published from the separate
-  # public rackops-agent repo. Override with RACKOPS_AGENT_RELEASE_BASE.
-  RELEASE_URL="${RACKOPS_AGENT_RELEASE_BASE:-https://github.com/heavenmatrixtechsolutions/rackops-agent/releases/download}/${VERSION}/${BINARY}-linux-${ARCH}"
+  # (HeavenMatrix-Labs); releases are published from the separate public
+  # rackops-agent repo. Override with RACKOPS_AGENT_RELEASE_BASE.
+  RELEASE_URL="${RACKOPS_AGENT_RELEASE_BASE:-https://github.com/HeavenMatrix-Labs/rackops-agent/releases/download}/${VERSION}/${BINARY}-linux-${ARCH}"
   if ! curl -fsSL "$RELEASE_URL" -o "${WORKDIR}/${BINARY}" 2>/dev/null; then
     echo "    (no published release at ${RELEASE_URL})"
     SRC="$(pwd)"
