@@ -3,10 +3,7 @@
 // ticket 02; until then this is the only surface.
 package health
 
-import (
-	"net/http"
-	"strings"
-)
+import "net/http"
 
 // Handler returns the health handler. GET /health answers 200 with "ok".
 func Handler() http.Handler {
@@ -16,13 +13,4 @@ func Handler() http.Handler {
 		_, _ = w.Write([]byte("ok"))
 	})
 	return mux
-}
-
-// Serve is a convenience wrapper used by tests and the binary.
-func Serve(addr string) error {
-	srv := &http.Server{Addr: addr, Handler: Handler()}
-	if err := srv.ListenAndServe(); err != nil && !strings.HasPrefix(err.Error(), "http: Server.ListenAndServe") {
-		return err
-	}
-	return nil
 }
